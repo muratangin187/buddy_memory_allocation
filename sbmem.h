@@ -8,6 +8,7 @@ typedef struct Chunk {
     int order;
     int isAllocated; // 0 or 1
     int pid;
+    int usedSize;
 } Chunk;
 
 int sbmem_init(int segmentsize);
