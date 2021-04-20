@@ -8,144 +8,40 @@
 #include <unistd.h> // For ftruncate
 #include "sbmem.h"
 
-struct node* getHead(void* basePtr, int offset){
-    return basePtr+offset;
-}
-
-void linkedList_insert(struct linkedList *q, struct node *newNode){
-    newNode ->next = q->head;
-
-    q->head = newNode;
-    q->count++;
-}
-
-int deleteNode(struct linkedList *q, int startAddress){
-    if(q->count == 0)
-        return -1;
-    struct node * retrievedNode;
-    retrievedNode = q->head;
-    struct node * prev = NULL;
-
-    if(retrievedNode != NULL && retrievedNode->chunk.start == startAddress){
-        q->head = retrievedNode->next;
-        //TODO FREE
-        return 1;
-    }
-    while(retrievedNode != NULL && retrievedNode->chunk.start != startAddress){
-        prev = retrievedNode;
-        retrievedNode = retrievedNode->next;
-    }
-    if(retrievedNode == NULL){
-        return -1;
-    }
-
-    prev->next = retrievedNode->next;
-    q->count--;
-    //TODO: FREE
-    return 1;
-}
-
-struct node * search(struct linkedList *q, int startAddress){
-    if(q->count == 0)
-        return NULL;
-    struct node * retrievedNode;
-    retrievedNode = q->head;
-
-    if(retrievedNode != NULL && retrievedNode->chunk.start == startAddress){
-        q->head = retrievedNode->next;
-        return retrievedNode;
-    }
-    while(retrievedNode != NULL && retrievedNode->chunk.start != startAddress){
-        retrievedNode = retrievedNode->next;
-    }
-    if(retrievedNode == NULL){
-        return NULL;
-    }
-    return (retrievedNode);
-}
-
-void pushToTail(struct linkedList *q, struct node *newNode){
-    if(q->count == 0){
-        q->head = newNode;
-    }
-    struct node*tail = q->head;
-    while(tail->next != NULL )
-        tail = tail ->next;
-    tail->next = newNode;
-    newNode->next = NULL;
-    q->count++;
-}
-
-void display(struct linkedList **q, int size){
-    printf("\n");
-    for(int i=0; i<size; i++){
-        printf("{");
-        struct node* tmp;
-
-        tmp = q[i]->head;
-        while(tmp != NULL){
-            printf("(%d, %d)", tmp -> chunk.start, tmp -> chunk.end);
-            tmp = tmp->next;
-        }
-        printf("}, ");
-    }
-    printf("\n");
-}
-
-void displayNode(struct node *cur)
-{
-    printf("(%d", cur->chunk.start);
-    printf(",%d", cur->chunk.end);
-    printf(")");
-}
-
 // Define a name for your shared memory; you can give any name that start with a slash character; it will be like a filename.
-
 // Define semaphore(s)
-
 // Define your stuctures and variables.
-
 // calculate needed memory and allocate for library usage
-int detectNeededMemorySize(int segmentSize){
-    return 2*sizeof(int);
+int getOffset(int order){
+    return
 }
 
 int getMaxOrder(int segmentSize){
-    return ceil(log(segmentSize) / log(2))+1;
+    return ceil(log(segmentSize) / log(2));
+}
+
+int detectNeededMemorySize(int segmentSize){
+    return (int)(pow(2, getMaxOrder(segmentSize)-7)*sizeof(Chunk)) + 2*sizeof(int);
 }
 
 int sbmem_init(int segmentSize)
 {
-    printf ("sbmem init called\n"); // remove all printfs when you are submitting to us.
-    if(segmentSize % 2 != 0){
-        printf("Error, segment size must be a power of two!\n");
-        return -1;
-    }
-
     int shared_fd = shm_open(FDNAME, O_CREAT | O_RDWR, 0666);
     ftruncate(shared_fd, segmentSize+detectNeededMemorySize(segmentSize));
     void* ptr = mmap(0, segmentSize+detectNeededMemorySize(segmentSize), PROT_WRITE, MAP_SHARED, shared_fd, 0);
     void* basePtr = ptr;
+
     *(int *)ptr = segmentSize; // maximum order
     ptr += sizeof(int);
     *(int *)ptr = 1; // current index of freelist
     ptr += sizeof(int);
-    struct linkedList* allocatedList = (struct linkedList*)ptr;
-    allocatedList->count = 0;
-    allocatedList->head = NULL;
-    ptr += sizeof(struct linkedList);
-    struct linkedList** link = (struct linkedList**)ptr;
-    ptr += getMaxOrder(segmentSize)*sizeof(struct linkedList*);
-    for(int i = 0; i < getMaxOrder(segmentSize); i++){
-        link[i] = (struct linkedList*)ptr;
-        link[i]->count = 1;
-        link[i]->head = NULL;
-        ptr += sizeof(struct linkedList);
-    }
-    ((struct node*)ptr)->next = NULL;
-    ((struct node*)ptr)->chunk.start = 0;
-    ((struct node*)ptr)->chunk.end = segmentSize-1;
-    linkedList_insert(link[getMaxOrder(segmentSize)-1], (struct node*)ptr);
+
+    Chunk* chunk = (Chunk*)ptr;
+    chunk->start = 0;
+    chunk->end = segmentSize-1;
+    chunk->isAllocated = 0;
+    chunk->order = getMaxOrder(segmentSize);
+    chunk->pid = -1;
     munmap(basePtr, segmentSize+ detectNeededMemorySize(segmentSize));
 
     return 0;
@@ -172,18 +68,12 @@ void *sbmem_alloc (int requested_size)
     int segmentSize = *(int *)(ptr);
     int maxOrder = getMaxOrder(segmentSize);
     munmap(ptr, sizeof(int));
+
     ptr = mmap(0, segmentSize+detectNeededMemorySize(segmentSize), PROT_WRITE, MAP_SHARED, shm_fd, 0);
     void* userBasePtr = ptr + detectNeededMemorySize(segmentSize);
     ptr += sizeof(int);
     int* currentIndex = (int *)(ptr);
     ptr += sizeof(int);
-
-
-
-    struct linkedList* allocatedList = (struct linkedList*)ptr;
-    ptr += sizeof(struct linkedList);
-    struct linkedList** freeList = (struct linkedList **) (ptr);
-    ptr += getMaxOrder(segmentSize) * (sizeof(struct linkedList*) + sizeof(struct linkedList));
 
     int n = ceil(log(requested_size) / log(2));
     if(freeList[n] ->count > 0){

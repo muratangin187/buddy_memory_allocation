@@ -2,20 +2,13 @@
 #define PROJECT3_SBMEM_H
 #define FDNAME "/project3"
 
-struct chunk {
+typedef struct Chunk {
     int start;
     int end;
-};
-
-struct node {
-    struct node *next;
-    struct chunk chunk;
-};
-
-struct linkedList {
-    struct node* head;
-    int count;
-};
+    int order;
+    int isAllocated; // 0 or 1
+    int pid;
+} Chunk;
 
 int sbmem_init(int segmentsize);
 int sbmem_remove();
