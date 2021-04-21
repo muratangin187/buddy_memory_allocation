@@ -1,4 +1,3 @@
-#include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include "sbmem.h"
@@ -14,7 +13,7 @@ int main()
     for (i = 0; i < ASIZE; ++i)
         p[i] = 'a'; // init all chars to ‘a’
     printf("%s", p);
-    sbmem_free (p);
+//    sbmem_free (p);
     sbmem_close();
     return (0);
 }

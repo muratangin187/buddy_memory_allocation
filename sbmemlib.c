@@ -6,17 +6,17 @@
 #include <fcntl.h> // For constants O_CREAT, O_RDWR
 #include <sys/mman.h> // For shm_open
 #include <unistd.h> // For ftruncate
+#include <semaphore.h>
 #include "sbmem.h"
 
 void* g_ptr;
 void* g_userPtr;
 int g_segmentSize;
 int* g_currentIndex;
+int* g_userCount;
 
-// Define a name for your shared memory; you can give any name that start with a slash character; it will be like a filename.
-// Define semaphore(s)
-// Define your stuctures and variables.
-// calculate needed memory and allocate for library usage
+sem_t *sem_users;
+sem_t *sem_mutex;
 
 int getOrderFreeCount(int order){
     int count = 0;
@@ -45,7 +45,7 @@ int getMaxOrder(int segmentSize){
 }
 
 int detectNeededMemorySize(int segmentSize){
-    return (int)(pow(2, getMaxOrder(segmentSize)-7)*sizeof(Chunk)) + 2*sizeof(int);
+    return (int)(pow(2, getMaxOrder(segmentSize)-7)*sizeof(Chunk)) + 3*sizeof(int);
 }
 
 void deleteChunk(int start){
@@ -110,16 +110,39 @@ void displayAllocated(){
     printf("\n");
 }
 
+void display(){
+    displayAllocated();
+    displayFree();
+}
+
 int sbmem_init(int segmentSize)
 {
+    if(segmentSize == 0 || ceil(log2(segmentSize)) != floor(log2(segmentSize))){
+        printf("Segment size must be power of two");
+        return -1;
+    }
+
     int shared_fd = shm_open(FDNAME, O_CREAT | O_TRUNC | O_RDWR, 0666);
-    ftruncate(shared_fd, segmentSize+detectNeededMemorySize(segmentSize));
+    if(shared_fd == -1){
+        printf("Error on shm_open function");
+        return -1;
+    }
+    if(ftruncate(shared_fd, segmentSize+detectNeededMemorySize(segmentSize)) == -1){
+        printf("Error on ftruncate function");
+        return -1;
+    }
     void* ptr = mmap(0, segmentSize+detectNeededMemorySize(segmentSize), PROT_WRITE, MAP_SHARED, shared_fd, 0);
+    if(ptr == MAP_FAILED){
+        printf("Error on mmap function");
+        return -1;
+    }
     void* basePtr = ptr;
 
     *(int *)ptr = segmentSize; // maximum order
     ptr += sizeof(int);
     *(int *)ptr = 1; // current index of freelist
+    ptr += sizeof(int);
+    *(int *)ptr = 9; // user count
     ptr += sizeof(int);
 
     Chunk* chunk = (Chunk*)ptr;
@@ -129,21 +152,46 @@ int sbmem_init(int segmentSize)
     chunk->order = getMaxOrder(segmentSize);
     chunk->pid = -1;
     chunk->usedSize = -1;
-    munmap(basePtr, segmentSize+ detectNeededMemorySize(segmentSize));
+    if(munmap(basePtr, segmentSize+ detectNeededMemorySize(segmentSize)) == -1){
+        printf("Error on munmap function");
+        return -1;
+    }
+
+    sem_unlink(SEM_USERS);
+    sem_unlink(SEM_MUTEX);
+
+    /* create and initialize the semaphores */
+    sem_users = sem_open(SEM_USERS, O_RDWR | O_CREAT, 0660, 1);
+    if (sem_users < 0) {
+        perror("Can not create semaphore SEM_USERS\n");
+        exit (1);
+    }
+    printf("Semaphore %s created\n", SEM_USERS);
+
+    sem_mutex = sem_open(SEM_MUTEX, O_RDWR | O_CREAT, 0660, 1);
+    if (sem_mutex < 0) {
+        perror("Can not create semaphore SEM_MUTEX\n");
+        exit (1);
+    }
+    printf("Semaphore %s created\n", SEM_MUTEX);
 
     return 0;
 }
 
 int sbmem_remove()
 {
-
+    shm_unlink(FDNAME);
+    sem_unlink(SEM_USERS);
+    sem_unlink(SEM_MUTEX);
     return (0);
 }
 
 int sbmem_open()
 {
-    // TODO check 10 process is exists or not!
-    int shm_fd = shm_open(FDNAME, O_CREAT | O_RDWR, 0666);
+    sem_users = sem_open(SEM_USERS, O_RDWR);
+    sem_wait(sem_users);
+
+    int shm_fd = shm_open(FDNAME, O_RDWR, 0666);
     g_ptr = mmap(0, sizeof(int), PROT_READ, MAP_SHARED, shm_fd, 0);
     g_segmentSize = *(int *)(g_ptr);
     munmap(g_ptr, sizeof(int));
@@ -153,14 +201,26 @@ int sbmem_open()
     g_ptr += sizeof(int);
     g_currentIndex = (int *)(g_ptr);
     g_ptr += sizeof(int);
-    displayAllocated();
-    displayFree();
-    return (0);
+    g_userCount = (int *)(g_ptr);
+    if(*g_userCount == 10){
+        printf("At most 10 processes will request memory");
+        sem_post(sem_users);
+        return -1;
+    }
+    (*g_userCount)++;
+    g_ptr += sizeof(int);
+//    displayAllocated();
+//    displayFree();
+
+    sem_post(sem_users);
+    return 0;
 }
 
 
 void *sbmem_alloc (int requested_size)
 {
+    sem_mutex = sem_open(SEM_MUTEX, O_RDWR);
+    sem_wait(sem_mutex);
     //get size from shared memory
     int n = ceil(log(requested_size) / log(2));
     if(getOrderFreeCount(n) > 0){
@@ -177,8 +237,9 @@ void *sbmem_alloc (int requested_size)
         newKeyValue->order = n;
         newKeyValue->pid = getpid();
         newKeyValue->usedSize = requested_size;
-        displayAllocated();
-        displayFree();
+//        displayAllocated();
+//        displayFree();
+        sem_post(sem_mutex);
         return g_userPtr+parent_start;
     }else{
         int i;
@@ -188,6 +249,7 @@ void *sbmem_alloc (int requested_size)
         }
         if(i == getMaxOrder(g_segmentSize)+1){
             printf("Failed to allocate memory\n");
+            sem_post(sem_mutex);
             return NULL;
         }else{
             Chunk* tmp = getOrderHead(i);
@@ -231,8 +293,9 @@ void *sbmem_alloc (int requested_size)
             newKeyValue->order = parent_order;
             newKeyValue->pid = getpid();
             newKeyValue->usedSize = requested_size;
-            displayAllocated();
-            displayFree();
+//            displayAllocated();
+//            displayFree();
+            sem_post(sem_mutex);
             return g_userPtr+parent_start;
         }
     }
@@ -240,11 +303,14 @@ void *sbmem_alloc (int requested_size)
 
 void sbmem_free (void *p)
 {
+    sem_mutex = sem_open(SEM_MUTEX, O_RDWR);
+    sem_wait(sem_mutex);
     int offset = p-g_userPtr;
     Chunk* allocated = chunkIsAllocated(offset);
     if(allocated == NULL){
        printf("Invalid free address\n");
-       return;
+        sem_post(sem_mutex);
+        return;
     }
     printf("Freed %d and %d.\n", allocated->start, allocated->end);
 
@@ -290,12 +356,15 @@ void sbmem_free (void *p)
             allocated = NULL;
         }
     }
-    displayAllocated();
-    displayFree();
+    sem_post(sem_mutex);
 }
 
 int sbmem_close()
 {
-
+    sem_users = sem_open(SEM_USERS, O_RDWR);
+    sem_wait(sem_users);
+    (*g_userCount)--;
+    munmap(g_ptr-3*sizeof(int), g_segmentSize+detectNeededMemorySize(g_segmentSize));
+    sem_post(sem_users);
     return (0);
 }
